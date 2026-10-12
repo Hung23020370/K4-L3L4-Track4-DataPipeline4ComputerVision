@@ -4,9 +4,9 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
+| Họ và tên | `Đồng Mạnh Hùng` |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602412` |
+| GitHub | `https://github.com/Hung23020370/K4-L3L4-Track4-DataPipeline4ComputerVision` |
 | Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
 
 ## Kết quả cuối
@@ -21,7 +21,15 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Từ kết quả bước 1 (A có 3021 dòng, B có 3234 dòng), mình thấy 5 khác biệt giữa A và B:
+
+Tên cột: A dùng ts_utc, speed_mps, heading_deg, lat, lon, alt_m, acc_x, acc_y, gas, brake, steer; B dùng timestamp_ms, spd_kmh, hdg, latitude, longitude, altitude, ax, ay, throttle_pct, brake_pct, steering.
+Đơn vị tốc độ: A là m/s (1.213), B là km/h (55.11).
+Kiểu timestamp: A là chuỗi ISO 8601 UTC (2025-10-07T08:00:00.014Z), B là epoch mili giây (1759933801509).
+Thang đo bàn đạp: A là tỉ lệ 0-1 (gas = 0.028), B là phần trăm (throttle_pct = 2.0).
+Độ lệch đồng hồ: bảng bronze_video_files ghi telemetry_clock_offset_ms = 0 cho drive_a và 1500 cho drive_b. Đồng hồ thiết bị B chạy lệch so với video (timestamp đầu tiên của B là 14:30:01.509, trong khi video bắt đầu 14:30:00).
+
+Pipeline giữ mỗi nguồn một bảng bronze vì schema khác nhau; gộp ngay sẽ phải chọn một schema và làm mất thông tin gốc. Mọi cột để ở dạng chữ vì bronze là bản ghi nguyên bản, chỉ thêm: nếu ép kiểu ngay, một giá trị lỗi (ô trống, tốc độ vô lý, chuỗi không đọc được) có thể làm cả lô nạp hỏng hoặc bị biến mất im lặng. Để nguyên dạng chữ thì mọi dòng đều được nạp, rồi việc ép kiểu, đổi đơn vị, trừ độ lệch và cách ly dòng lỗi làm ở silver, nơi có thể sửa luật và chạy lại từ dữ liệu gốc. Các cột _source_file, _batch_id, _row_no, _ingested_at giúp truy vết mỗi dòng về file nguồn.
 
 ## Bước 2 · Silver telemetry
 
