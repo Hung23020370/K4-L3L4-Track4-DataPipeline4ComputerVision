@@ -79,7 +79,20 @@ Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả th
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+Kết quả từ `idempotency.json` (partition `trip-00003`, trip này có 60 khung):
+
+| Cách ghi | Số dòng bảng `silver.frames` | Dấu vân tay |
+|---|---|---|
+| Trước khi chạy lại | 1246 | `6c7480dfde7e` |
+| Delta `overwrite` theo `trip_id`, chạy lại 2 lần | 1246 | `6c7480dfde7e` (không đổi) |
+| `append`, chạy 2 lần | trip-00003 có 120 dòng (đáng lẽ 60) | nhân đôi (2x) |
+
+Ghi đè theo partition là **idempotent**: chạy bao nhiêu lần cũng ra cùng một kết quả. `append` thì mỗi lần chạy lại (do retry của Airflow hoặc do mình bấm chạy lại) lại cộng thêm dữ liệu, làm trùng khung và sai mọi thống kê phía sau.
+
+**Vì sao Delta `overwrite` theo partition an toàn hơn xoá rồi ghi lại:**
+- Delta ghi theo **giao dịch nguyên tử**: lệnh `overwrite` chỉ thay các file của partition đó bằng một commit duy nhất trong transaction log. Nếu giữa chừng có lỗi thì commit không xảy ra, bảng vẫn ở phiên bản cũ nguyên vẹn.
+- Xoá rồi ghi lại là **hai bước riêng**. Nếu sập sau bước xoá và trước bước ghi, trip đó biến mất khỏi bảng (mất dữ liệu), và người đọc trong lúc đó thấy một partition rỗng.
+- Chỉ đụng đúng một partition (một trip), 25 trip còn lại không bị ảnh hưởng, nên chạy lại rẻ và rủi ro nhỏ. Lịch sử phiên bản của Delta còn cho phép quay lại bản cũ nếu cần.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
@@ -90,7 +103,33 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 | 2 | | |
 | 6 | | |
 
-(trả lời ở đây)
+**Khung đen và khung tối khác nhau:**
+
+| | Khung đen | Khung tối |
+|---|---|---|
+| Độ sáng trung bình (luma) | dưới `dark_luma` = 12 | từ 12 đến dưới `dark_soft` = 40 |
+| Bản chất | gần như không có thông tin hình ảnh | vẫn còn nội dung, chỉ thiếu sáng (đường hầm, bóng râm, ban đêm) |
+| Cách xử lý | gắn cờ `is_black` và loại khỏi dữ liệu huấn luyện | gắn cờ `is_dark` nhưng **giữ lại** |
+| Số khung của mình | drive A: 6, drive B: 4 | drive A: 4, drive B: 61 |
+
+Mình **đồng ý** với cách làm này: khung đen không dạy được mô hình điều gì, còn khung tối là điều kiện thật khi lái xe (B có tới 61 khung tối vì đường hầm và bóng râm). Nếu loại hết khung tối, mô hình sẽ không bao giờ thấy điều kiện thiếu sáng và hoạt động kém đúng lúc cần nhất. Giữ lại kèm cờ thì người dùng dữ liệu vẫn lọc được nếu muốn.
+
+**Số khung bị coi là trùng theo ngưỡng dHash** (từ `threshold.json`, tổng A = 602 khung, B = 644 khung):
+
+| dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
+|---|---|---|
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
+
+Tỉ lệ tương ứng: A là 10%, 25%, 60%; B là 1%, 8%, 38%.
+
+**Mình chọn ngưỡng 2** (đang dùng trong pipeline) vì:
+- Ngưỡng 0 chỉ bắt khung giống hệt từng bit, bỏ sót khung gần như trùng chỉ khác nhiễu nén video. Với drive A, kiểm tra tự động cho thấy ngưỡng 2 bắt được 11/12 khung của đoạn camera đứng hình 6 giây.
+- Ngưỡng 6 loại tới 60% khung của A, gần như chắc chắn xoá cả những khung thật sự khác nhau (số khung trùng tăng mạnh theo ngưỡng, từ 149 lên 363).
+- Ngưỡng 2 nằm ở giữa: bắt được khung trùng thật mà không phá quá nhiều dữ liệu.
+
+**Phụ thuộc vào tốc độ xe:** lấy mẫu 2 khung/giây, nên khi xe chạy chậm hoặc đứng yên, hai khung liên tiếp rất giống nhau và trùng rất nhiều; xe chạy nhanh thì cảnh đổi nhanh, khung khác nhau nhiều và cùng một ngưỡng chỉ bắt được ít khung trùng. Dữ liệu của mình phản ánh điều này: A có nhiều khung trùng hơn B ở mọi ngưỡng (149 so với 53 tại ngưỡng 2), một phần vì A có đoạn camera đứng hình và xe chạy chậm. Vì vậy một ngưỡng cố định là sự thoả hiệp; nếu muốn chính xác hơn có thể điều chỉnh ngưỡng theo tốc độ (xe chậm thì chặt hơn, xe nhanh thì lỏng hơn).
 
 ## Bước 4 · Gold
 
