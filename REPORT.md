@@ -7,12 +7,12 @@
 | Họ và tên | `Đồng Mạnh Hùng` |
 | MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602412` |
 | GitHub | `https://github.com/Hung23020370/K4-L3L4-Track4-DataPipeline4ComputerVision` |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-04237` |
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `d4cc4614711a`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `763 / 101 / 155`
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -96,12 +96,6 @@ Ghi đè theo partition là **idempotent**: chạy bao nhiêu lần cũng ra cù
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
-
-| dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
-|---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
 
 **Khung đen và khung tối khác nhau:**
 
@@ -192,21 +186,72 @@ Thiếu bất kỳ mục nào ở trên (nhất là MSSV hoặc phiên bản b�
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+**Khi sập:** đúng **1 task** `silver_frames` (bản của trip-04237, trong 26 bản) chuyển **đỏ**. Log ghi `RuntimeError: simulated crash while extracting trip-04237; run it again`. **7 task** phía sau (`dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse`) chuyển `upstream_failed`: Airflow không chạy chúng vì task cha hỏng, nên dữ liệu dở dang không đi tiếp xuống gold.
 
+**Cách chạy lại:** mình chỉ **clear đúng task đỏ** (bản trip-04237, kèm các task phía sau theo mặc định), không clear cả DAG hay cả run. 25 trip đã thành công được giữ nguyên, chỉ trip hỏng chạy lại (biến sập chỉ sập đúng một lần) rồi 7 task sau chạy tiếp. DAG chuyển xanh.
+
+**Kết quả kiểm tra:** `scripts/lab.sh verify` sau khi chạy lại đạt **27/27**; `silver.frames` vẫn có 1246 khung với `frame_id` duy nhất, nên **không nhân đôi** dữ liệu; `dataset_version` vẫn là **`d4cc4614711a`** (không đổi so với trước khi sập). Lý do: bước `silver_frames` ghi bằng Delta `overwrite` theo partition từng trip (idempotent, xem Câu 4), còn `dataset_version` là băm nội dung (xem Câu 7), nên chạy lại cùng dữ liệu cho đúng cùng kết quả.
+
+**Bằng chứng:** `report/screenshots/airflow_fail_log.png` (log task đỏ, thấy trip-04237), `airflow_graph_failed.png` (Graph lúc đỏ), `airflow_graph_after_retry.png` (Graph xanh sau khi clear), `report/verify.txt`.
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Với 500 xe mỗi ngày (mỗi xe nhiều trip, video và telemetry liên tục), ba thành phần mình thấy sẽ vỡ đầu tiên:
+
+| Thành phần hiện tại | Vì sao vỡ | Thay bằng |
+|---|---|---|
+| **Một container Airflow chạy `silver_frames` bằng lệnh bash và FFmpeg decode ngay trong container** | Mỗi trip một task, hiện 26 task đã đủ làm máy chậm. Hàng nghìn trip mỗi ngày sẽ hết CPU/RAM trên một máy, task bị kill | Chạy task trên cụm phân tán (Kubernetes Executor hoặc Celery), decode video bằng worker/GPU tách riêng, xử lý song song theo partition |
+| **dbt chạy trên DuckDB một máy** | DuckDB và file `.duckdb` nằm trên một node, không scale ngang; bảng khung hình lên hàng chục triệu dòng | Engine phân tán hoặc kho dữ liệu đám mây (Spark/Trino trên Delta, hoặc BigQuery/Snowflake), dbt vẫn giữ làm lớp biến đổi |
+| **MinIO đơn nút + Postgres làm warehouse và Metabase đọc trực tiếp** | Hàng triệu file ảnh nhỏ làm object store và phần ghi/đọc thành nút cổ chai; Postgres không phù hợp cho mart rất lớn | Object storage đám mây (S3) có phân vùng và nén file nhỏ, warehouse dạng cột (ClickHouse, BigQuery) cho dashboard |
+
+Ngoài ba điểm trên, telemetry hiện nạp theo lô từ CSV, với 500 xe mỗi ngày nên chuyển sang luồng liên tục (Kafka) và chỉ nạp gia tăng thay vì quét lại. 
 
 ## Câu hỏi riêng của bạn trên Metabase
 
-Câu SQL bạn thêm vào dashboard và điều nó cho biết:
+**Câu hỏi:** Tỷ lệ khung bị loại (reject rate) của từng trip là bao nhiêu, và trip nào bị loại nhiều nhất?
 
-(trả lời ở đây)
+**SQL** (chạy trên `marts.mart_trip_summary`):
+
+​```sql
+SELECT
+  trip_id,
+  frames,
+  frames_kept,
+  frames - frames_kept AS frames_rejected,
+  ROUND(100.0 * (frames - frames_kept) / NULLIF(frames, 0), 2) AS reject_pct
+FROM marts.mart_trip_summary
+ORDER BY reject_pct DESC;
+​```
+
+**Kết quả:** Truy vấn trả về 26 trip. Năm trip có tỷ lệ loại cao nhất là
+trip-04622 (56,67%, loại 34/60 khung), trip-03904 (50%, 11/22),
+trip-02086 (46,67%), trip-08888 (40%) và trip-07774 (38,24%).
+Trip thấp nhất là trip-04324 với 0%; trip của mình, trip-04237, có tỷ lệ 1,67%.
+
+**Nhận xét:**
+- Tỷ lệ loại giữa các trip chênh nhau lớn, và trip tệ nhất bị loại hơn một nửa số khung,
+  nên chất lượng dữ liệu đầu vào không đồng đều giữa các trip.
+- trip-03904 chỉ có 22 khung nên con số 50% dựa trên mẫu nhỏ, cần thận trọng khi so với
+  các trip có 60 khung.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+**Điều mình học được:**
+Ở bước Metabase, mình mất khá nhiều thời gian vì chạy SQL nhầm trên "Sample Database" thay vì database `warehouse`. Lỗi `no such table` và `relation does not exist` khác nhau tuỳ database đang chọn, nên mình rút ra là đọc kỹ thông báo lỗi và kiểm tra nguồn dữ liệu trước khi nghi ngờ câu SQL. Mình cũng nhận ra cần dùng tên đầy đủ `marts.mart_trip_summary`.
+
+**Điều làm mình bất ngờ:**
+Tỷ lệ khung bị loại giữa các trip chênh nhau rất lớn: trip cao nhất (trip-04622) bị loại 56,67% số khung, trong khi trip-04324 thấp nhất chỉ 0% (trip của mình là trip-04237 bị loại 1,67%). Điều này cho thấy chất lượng thu thập thực tế phụ thuộc rất mạnh vào điều kiện ngoại cảnh từng chuyến (rung lắc, hầm tối, xe đứng yên gây trùng lặp) chứ không phân bổ đồng đều giữa các xe.
+
+**Điều còn chưa rõ & Khâu khó nhất:**
+Khâu khó nhất với mình là debug sự phụ thuộc giữa các task trong Airflow DAG khi có lỗi phát sinh (clear task con nhưng cần nắm rõ lineage để tránh re-run thừa). 
+
+**Lỗi dữ liệu pipeline chưa bắt được:**
+Pipeline lọc tốt khung đen, mờ, trùng lặp và lệch mốc đồng bộ (sync tolerance), nhưng chưa bắt được lỗi "đóng băng cảm biến" (freeze sensor) khi telemetry vẫn gửi đều đúng timestamp nhưng các giá trị vận tốc/gia tốc bị kẹt cứng một số không đổi dù xe đang di chuyển.
+
+**Nếu làm lại, mình sẽ:**
+Chủ động kiểm tra kết nối DB và cấu trúc schema ngay từ đầu
+
+**Hạn chế của bài làm:**
+Chưa đào sâu kiểm tra nguyên nhân cụ thể từng khung bị loại ở các trip có reject rate cao bất thường (như trip-04622); cỡ mẫu một số trip quá nhỏ (như trip-03904 chỉ có 22 khung) khiến tỷ lệ phần trăm dễ bị lệch và chưa hoàn toàn phản ánh độ ổn định lâu dài.
