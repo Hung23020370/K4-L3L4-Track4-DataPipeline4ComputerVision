@@ -21,27 +21,58 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-Từ kết quả bước 1 (A có 3021 dòng, B có 3234 dòng), mình thấy 5 khác biệt giữa A và B:
+Từ kết quả bước 1 (nguồn A có 3021 dòng, nguồn B có 3234 dòng), mình thấy 5 khác biệt giữa A và B:
 
-Tên cột: A dùng ts_utc, speed_mps, heading_deg, lat, lon, alt_m, acc_x, acc_y, gas, brake, steer; B dùng timestamp_ms, spd_kmh, hdg, latitude, longitude, altitude, ax, ay, throttle_pct, brake_pct, steering.
-Đơn vị tốc độ: A là m/s (1.213), B là km/h (55.11).
-Kiểu timestamp: A là chuỗi ISO 8601 UTC (2025-10-07T08:00:00.014Z), B là epoch mili giây (1759933801509).
-Thang đo bàn đạp: A là tỉ lệ 0-1 (gas = 0.028), B là phần trăm (throttle_pct = 2.0).
-Độ lệch đồng hồ: bảng bronze_video_files ghi telemetry_clock_offset_ms = 0 cho drive_a và 1500 cho drive_b. Đồng hồ thiết bị B chạy lệch so với video (timestamp đầu tiên của B là 14:30:01.509, trong khi video bắt đầu 14:30:00).
+| Khía cạnh | Nguồn A | Nguồn B |
+|---|---|---|
+| Tên cột | `ts_utc, speed_mps, heading_deg, lat, lon, alt_m, acc_x, acc_y, gas, brake, steer` | `timestamp_ms, spd_kmh, hdg, latitude, longitude, altitude, ax, ay, throttle_pct, brake_pct, steering` |
+| Đơn vị tốc độ | m/s (ví dụ `1.213`) | km/h (ví dụ `55.11`) |
+| Kiểu timestamp | chuỗi ISO 8601 UTC (`2025-10-07T08:00:00.014Z`) | epoch mili giây (`1759933801509`) |
+| Thang bàn đạp | tỉ lệ 0–1 (`gas` = 0.028) | phần trăm (`throttle_pct` = 2.0) |
+| Độ lệch đồng hồ | `telemetry_clock_offset_ms` = 0 | `telemetry_clock_offset_ms` = 1500 |
 
-Pipeline giữ mỗi nguồn một bảng bronze vì schema khác nhau; gộp ngay sẽ phải chọn một schema và làm mất thông tin gốc. Mọi cột để ở dạng chữ vì bronze là bản ghi nguyên bản, chỉ thêm: nếu ép kiểu ngay, một giá trị lỗi (ô trống, tốc độ vô lý, chuỗi không đọc được) có thể làm cả lô nạp hỏng hoặc bị biến mất im lặng. Để nguyên dạng chữ thì mọi dòng đều được nạp, rồi việc ép kiểu, đổi đơn vị, trừ độ lệch và cách ly dòng lỗi làm ở silver, nơi có thể sửa luật và chạy lại từ dữ liệu gốc. Các cột _source_file, _batch_id, _row_no, _ingested_at giúp truy vết mỗi dòng về file nguồn.
+Pipeline giữ **mỗi nguồn một bảng bronze** vì schema hai nguồn khác nhau; gộp ngay sẽ phải chọn một schema và làm mất thông tin gốc. Mọi cột để ở dạng **chữ** vì bronze là bản ghi nguyên bản, chỉ thêm: nếu ép kiểu ngay, một giá trị lỗi (ô trống, tốc độ vô lý) có thể làm hỏng cả lô nạp hoặc bị mất im lặng. Để nguyên dạng chữ thì mọi dòng đều được nạp, rồi việc ép kiểu, đổi đơn vị, trừ độ lệch đồng hồ và cách ly dòng lỗi làm ở silver, nơi có thể sửa luật và chạy lại từ dữ liệu gốc. Các cột `_source_file`, `_batch_id`, `_row_no`, `_ingested_at` giúp truy vết mỗi dòng về file nguồn.
 
 ## Bước 2 · Silver telemetry
 
 ### Câu 2
 Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
 
-(trả lời ở đây)
+**Cách đưa hai nguồn về một schema** (theo `stg_telemetry_a.sql` và `stg_telemetry_b.sql`): nguồn B được đổi tên cột về schema của A, tốc độ chia 3.6 (km/h → m/s), bàn đạp chia 100 (% → 0–1), và `timestamp_ms` đổi sang `timestamptz` UTC. B còn bị **trừ độ lệch đồng hồ 1500 ms** lấy từ `telemetry_clock_offset_ms` trong `bronze.video_files`.
+
+**Bằng chứng đã đúng:**
+- Thời điểm bắt đầu của B sau chuẩn hoá là `2025-10-08 14:30:00.009`, khớp thời điểm bắt đầu video (14:30:00). Nếu không trừ 1,5 giây thì B lệch so với khung hình.
+- Kiểm tra tự động "drive B clock offset removed" báo PASS.
+- Tốc độ tối đa hợp lý: A 71 km/h, B 100 km/h.
+
+**Bảng quarantine của mình:**
+
+| drive | duplicate | speed_missing | speed_out_of_range |
+|---|---|---|---|
+| drive_a | 20 | 30 | 3 |
+| drive_b | 20 | 30 | 3 |
+
+Cân đối số dòng: A có 2968 dòng sạch + 53 cách ly = 3021 (đúng số dòng bronze); B có 3181 + 53 = 3234. Tổng `silver.telemetry_rejects` là 106 dòng.
+
+**Vì sao vào `rejects` thay vì xoá:** dòng lỗi là bằng chứng về chất lượng nguồn. Giữ lại kèm `reject_reason` cho phép đếm tỉ lệ lỗi theo từng loại, truy ngược về cảm biến, và xét lại luật nếu luật quá chặt hoặc quá lỏng. Xoá im lặng thì không biết đã mất gì, và phép kiểm "sạch + cách ly = nhận về" cũng không làm được.
 
 ### Câu 3
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
-(trả lời ở đây)
+- `max_gap_ms` là **`warn`** vì khoảng trống trong telemetry (cảm biến mất tín hiệu, ngưỡng 1000 ms) là hiện tượng thật của dữ liệu xe, không phải lỗi pipeline và không làm sai số liệu. Cần báo để người vận hành biết, nhưng dừng cả pipeline là vô lý.
+- `in_range` (tốc độ 0..70 m/s) là **`error`** vì tốc độ vô lý làm hỏng mọi bước sau (huấn luyện, thống kê, dashboard), nên phải chặn trước khi dữ liệu đi tiếp.
+
+**Kết quả thí nghiệm `break-gate`** (`report/evidence/break_gate.json`):
+
+| | Kết quả |
+|---|---|
+| Luật bị nới | `max_speed_mps` từ 70 lên 1000 |
+| `gate_failed` | `true` |
+| Test bắt được | `in_range_silver_telemetry_speed_mps__70__0`, **6 dòng** (= 3 dòng vô lý × 2 drive) |
+| Tổng kết khi nới | `PASS=5 WARN=1 ERROR=1` |
+| Tổng kết sau khôi phục | `PASS=6 WARN=1 ERROR=0` |
+
+Điều này cho thấy cổng chất lượng là **lớp bảo vệ thứ hai**: dù luật làm sạch ở lớp trước bị nới nhầm, test `error` vẫn phát hiện và dừng DAG, nên dữ liệu xấu không lọt xuống gold. Test `warn` vẫn báo (WARN=1 ở cả hai lần) nhưng không chặn.
 
 ## Bước 3 · Silver frames
 
