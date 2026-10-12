@@ -136,17 +136,56 @@ Tỉ lệ tương ứng: A là 10%, 25%, 60%; B là 1%, 8%, 38%.
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+Kết quả từ `leakage.json` (1019 khung hình đáng dùng, thuộc 26 trip):
+
+| Cách chia | Trip bị chia cắt qua nhiều split | Trip có khung ở cả train lẫn test |
+|---|---|---|
+| Chia **theo khung hình** (ngẫu nhiên 70/15/15) | **26 / 26** | **26 / 26** |
+| Chia **theo trip** (gold của pipeline) | **0 / 26** | 0 |
+
+Khi chia ngẫu nhiên theo khung hình, **toàn bộ 26 trip đều bị chia cắt**, và cả 26 trip đều có khung nằm ở train lẫn test.
+
+**Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo:** pipeline lấy mẫu 2 khung/giây, nên các khung liền nhau của cùng một trip gần như giống hệt nhau (cùng cảnh, cùng ánh sáng, cùng góc nhìn). Nếu một khung nằm ở train và khung ngay cạnh nó nằm ở test, mô hình thực chất "đã thấy đề thi": nó chỉ cần nhớ cảnh đã học chứ không cần tổng quát hoá sang cảnh mới. Điểm trên tập test vì thế cao ảo, nhưng khi gặp đoạn đường chưa từng thấy ngoài thực tế thì hiệu năng thấp hơn nhiều. Chia theo trip (cảnh) thì test gồm những cảnh mô hình chưa từng gặp, nên điểm phản ánh đúng khả năng tổng quát hoá.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+**Vì sao `dataset_version` là băm nội dung:** theo `publish.py`, version là 12 ký tự đầu của SHA-256 trên danh sách `frame_id|split` của toàn bộ khung (đã sắp xếp theo `frame_id`). Ngày giờ hoặc số đếm thì **mỗi lần chạy lại lại cho giá trị khác** dù dữ liệu không đổi, nên không biết hai bản có giống nhau không, và không tái tạo được đúng bản đã huấn luyện. Băm nội dung thì cùng nội dung luôn ra cùng version (nhận diện được bản trùng, chạy lại an toàn), còn nội dung khác đi thì version tự đổi nên không thể nhầm lẫn giữa hai dataset khác nhau. Thời điểm tạo (`created_at`) chỉ nằm trong `manifest.json`, không tham gia vào phép băm.
+
+**Hai lần chạy liên tiếp:** `step 4` và `cli export-dataset` chạy lại đều cho `dataset_version = d4cc4614711a` (1019 khung, train 763 / val 101 / test 155, 18/4/4 trip), nên version không đổi dù giờ chạy khác nhau.
+
+**Vì sao khác bạn bè dù cùng dữ liệu:** theo SQL của gold, thứ tự xếp trip trong mỗi drive là `md5(trip_id || LAB_STUDENT_ID)`, tức MSSV (`2A202602412`) được trộn vào làm "muối". MSSV khác thì thứ tự khác, nên các trip rơi vào train/val/test khác nhau, danh sách `frame_id|split` khác nhau, và băm ra version khác. Cùng một dữ liệu gốc nhưng mỗi người có một cách chia hợp lệ riêng, nên không chép được kết quả của nhau.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+Dataset `d4cc4614711a` (1019 khung: drive_a 436, drive_b 583) được tạo từ dữ liệu sau, đọc trực tiếp từ `lineage` trong `manifest.json`:
+
+| Nguồn | Phiên bản Delta |
+|---|---|
+| `bronze.raw_telemetry_a` | 0 |
+| `bronze.raw_telemetry_b` | 0 |
+| `bronze.trips_raw` | 0 |
+| `bronze.video_files` | 1 |
+| `silver.frames` | 27 |
+| `silver.telemetry` | 0 |
+| `silver.frames_flagged` | 0 |
+| `silver.frame_telemetry` | 0 |
+
+Video đầu vào được xác định bằng sha256:
+- `drive_a`: `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+- `drive_b`: `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+
+Hai giá trị này khớp với cột `sha256` trong `bronze.video_files` mà mình đã truy vấn ở bước 1, nên dataset đúng là sinh từ hai file video đó chứ không phải bản khác. Một số phiên bản đọc được từ bảng: `bronze.video_files` ở version 1 vì có hai lần ghi (mỗi drive một lần nạp), còn `silver.frames` ở version 27 vì mỗi trip ghi một partition riêng (26 trip) cộng thêm hai lần chạy lại `trip-00003` của thí nghiệm idempotent.
+
+**Nếu 3 tháng sau có người hỏi, thông tin giúp tái tạo đúng dataset này:**
+1. `dataset_version` `d4cc4614711a` và `manifest_sha256` để đối chiếu và xác nhận kết quả khớp.
+2. Phiên bản của từng bảng trong `lineage`: Delta cho phép đọc lại bảng ở đúng phiên bản đó (time travel), nên lấy lại được dữ liệu y hệt lúc xuất.
+3. sha256 của hai video gốc, chứng minh đầu vào không bị thay.
+4. Luật trong manifest: loại các khung `is_black`, `is_blurry`, `is_near_dup` và khung không đồng bộ (`not sync_ok`); chia split theo trip, phân tầng theo drive, thứ tự md5.
+5. Các tham số trong `dbt_project.yml` (`dark_luma`, `blur_var`, `dup_hamming` = 2, `sync_tol_ms` = 150, `split_train` / `split_val`) và **MSSV** dùng làm muối chia split, cùng commit Git của mã pipeline.
+
+Thiếu bất kỳ mục nào ở trên (nhất là MSSV hoặc phiên bản bảng) thì không dựng lại được cùng một dataset.
 
 ## Bước 5 · Điều phối và phục vụ
 
